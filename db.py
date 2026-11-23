@@ -842,6 +842,88 @@ def committed_anchor(rows: bool = True) -> dict:
     }
 
 
+def _commit_for(cur, block_hash):
+    if block_hash:
+        cur.execute('SELECT tip, parent, journal_head, spec_revision FROM block_commits_v1 '
+                    'WHERE tip = ? ORDER BY committed_at DESC, rowid DESC LIMIT 1',
+                    (block_hash,))
+    else:
+        cur.execute('SELECT tip, parent, journal_head, spec_revision FROM block_commits_v1 '
+                    'ORDER BY committed_at DESC, rowid DESC LIMIT 1')
+    return cur.fetchone()
+
+
+def committed_journal_at(block_hash=None):
+    """The committed journal cut at one block's head, read in one locked read.
+
+    `block_hash=None` cuts at the latest commit. None when no commit record
+    names the block. The journal holds the canonical chain only: a reorg
+    rebuilds it from genesis (`reset_committed_journal`).
+
+    Returns {"tip", "journal_head", "spec_revision", "rows"}; `rows` are
+    `committed_journal_entries()` rows up to and including the head.
+    """
+    global _db_conn
+    if _db_conn is None:
+        init_db()
+    with _db_lock:
+        cur = _db_conn.cursor()
+        row = _commit_for(cur, block_hash)
+        if row is None:
+            return None
+        tip, _parent, head, revision = row
+        rows = _journal_rows(cur)
+    if head:
+        upto = next((r["seq"] for r in rows if r["link"] == head), None)
+        if upto is None:
+            return None
+        rows = [r for r in rows if r["seq"] <= upto]
+    else:
+        rows = []
+    return {"tip": tip, "journal_head": head, "spec_revision": revision, "rows": rows}
+
+
+def account_clauses_at_head(account: str):
+    """An account's registered clauses and the commit they are read at, in one
+    locked read: (tip, [(target_stream, clause_body), ...]). The registry is
+    kept for the head only."""
+    global _db_conn
+    if _db_conn is None:
+        init_db()
+    with _db_lock:
+        cur = _db_conn.cursor()
+        row = _commit_for(cur, None)
+        cur.execute("SELECT target_stream, clause_body FROM rule_clauses_v1 "
+                    "WHERE acceptor_pubkey = ? ORDER BY target_stream",
+                    ((account or "").lower(),))
+        clauses = [(int(r[0]), r[1]) for r in cur.fetchall()]
+    return (row[0] if row else None), clauses
+
+
+def block_journal_revisions(block_hash):
+    """The rule revisions committed while applying one block, in order, and the
+    engine's revision counter before the block. None when no commit record
+    names the block."""
+    global _db_conn
+    if _db_conn is None:
+        init_db()
+    with _db_lock:
+        cur = _db_conn.cursor()
+        row = _commit_for(cur, block_hash)
+        if row is None:
+            return None
+        _tip, parent, _head, _revision = row
+        before = None
+        if parent:
+            prow = _commit_for(cur, parent)
+            before = prow[3] if prow else None
+        cur.execute("SELECT seq, rule_text, outcome FROM tau_journal_v1 "
+                    "WHERE tip = ? AND kind = 'revision' ORDER BY seq", (block_hash,))
+        entries = [{"seq": int(r[0]), "rule_text": r[1], "outcome": r[2]}
+                   for r in cur.fetchall()]
+    return {"spec_revision_before": before, "entries": entries}
+
+
 def find_block_commit(execution_id: str):
     """The durable answer to "did this exact execution cross the boundary"."""
     global _db_conn
@@ -2097,6 +2179,22 @@ def get_recent_blocks(limit: int) -> List[Dict]:
     blocks = _parse_block_data_rows(rows)
     blocks.reverse()
     return blocks
+
+def get_canonical_block_hash_at(block_number: int) -> Optional[str]:
+    """The canonical block hash at a height, or None."""
+    head = get_canonical_head()
+    if not head or not head.get('block_hash'):
+        return None
+    path = set(get_chain_path(head['block_hash'], get_genesis_hash()) or ())
+    path.add(get_genesis_hash())
+    if _db_conn is None:
+        init_db()
+    with _db_lock:
+        cur = _db_conn.cursor()
+        cur.execute('SELECT block_hash FROM blocks WHERE block_number = ?', (int(block_number),))
+        hashes = [r[0] for r in cur.fetchall()]
+    return next((h for h in hashes if h in path), None)
+
 
 def get_canonical_blocks_at_or_after_height(block_number: int) -> List[Dict]:
     """

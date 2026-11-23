@@ -798,6 +798,7 @@ _OWNERS = {
     "tau_authority.py": "WorkerLost",
     "tau_preflight.py": "WorkerLost",
     "tau_policy.py": "WorkerLost",
+    "tau_rules_in_force.py": "WorkerLost",
     # These go through an AdmissionContext, which turns the loss into
     # AdmissionUnavailable at its own edge.
     os.path.join("commands", "getapprovalpreview.py"): "AdmissionUnavailable",

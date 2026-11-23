@@ -70,6 +70,48 @@ def _retractable_fields(db, tx_hash: str, block_hash: str) -> dict:
         return {}
 
 
+def _rule_outcome_fields(db, tx_hash: str, block_hash: str) -> dict:
+    """`rule_outcome` for a confirmed op-0 rule transaction (#42).
+
+    Read from the committed journal of the block (`tau_rules_in_force.
+    rule_tx_outcomes`): whether the engine took the revision, its outcome and
+    the revision counter before and after. Nothing is recorded for this at
+    apply, so every node holding the block answers the same, including for
+    blocks applied before an upgrade. A rule with no revision of the shared
+    specification (an `o5` rule goes to the clause registry) says so.
+    """
+    try:
+        block = db.get_block_by_hash(block_hash) or {}
+        txs = block.get("transactions") or []
+        ids = block.get("tx_ids") or []
+        if tx_hash not in ids or len(ids) != len(txs):
+            return {}
+        rules, mine = [], None
+        for tid, tx in zip(ids, txs):
+            ops = tx.get("operations") if isinstance(tx, dict) else None
+            text = ops.get("0") if isinstance(ops, dict) else None
+            if isinstance(text, str) and text.strip():
+                if tid == tx_hash:
+                    mine = len(rules)
+                rules.append(text)
+        if mine is None:
+            return {}
+        import tau_rules_in_force
+        outcomes = tau_rules_in_force.rule_tx_outcomes(block_hash, rules, store=db)
+        if outcomes is None:
+            return {"rule_outcome": {"recorded": False,
+                                     "reason": "no commit record for the block on this node"}}
+        found = outcomes[mine]
+        if found is None:
+            return {"rule_outcome": {"recorded": True, "engine_revision": None,
+                                     "note": "no revision of the shared specification "
+                                             "(a clause-registry rule claims none)"}}
+        return {"rule_outcome": {"recorded": True, "engine_revision": found}}
+    except Exception:
+        logger.exception("Failed to resolve rule outcome for %s", tx_hash)
+        return {}
+
+
 def execute(raw_command: str, container):
     parts = raw_command.split()
     if len(parts) != 2:
@@ -125,6 +167,7 @@ def execute(raw_command: str, container):
                     "confirmations": max(1, confirmations),
                 }
                 data.update(_retractable_fields(db, tx_hash, loc["block_hash"]))
+                data.update(_rule_outcome_fields(db, tx_hash, loc["block_hash"]))
                 return api_response.success_response("gettxstatus", data)
 
         # 3. Dropped without being mined?

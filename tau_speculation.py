@@ -206,6 +206,13 @@ class SpeculationSession:
     def state(self, *, timeout=_SESSION_DEFAULT) -> dict:
         return self._request({"op": "state"}, timeout=timeout)
 
+    def current_spec(self, *, timeout=_SESSION_DEFAULT) -> str:
+        """The specification the session's engine runs (`current_spec()`)."""
+        resp = self._request({"op": "spec"}, timeout=timeout)
+        if not resp.get("ok"):
+            raise SpeculationError(f"spec unavailable: {resp.get('error', '')}")
+        return str(resp.get("spec") or "")
+
     # --- disposal -------------------------------------------------------------
 
     def close(self, *, timeout: float = 5.0) -> int | None:
